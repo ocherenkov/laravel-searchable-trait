@@ -1,5 +1,6 @@
 <?php
 
+namespace App\Traits\Models;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Cache;
@@ -43,20 +44,23 @@ trait SearchTrait
             // Handle related models
             foreach (static::getSearchableRelations() as $relation => $fields) {
                 $query->orWhereHas($relation, function (Builder $subQuery) use ($search, $fields, $matchAllColumns) {
+                    $isFirstField = true;
                     foreach ($fields as $field) {
                         if (is_array($field)) {
                             // Handle concatenated fields in the related model
                             $concatExpression = DB::raw("LOWER(CONCAT_WS(' ', " . implode(', ', $field) . "))");
-                            if ($matchAllColumns) {
+                            if ($matchAllColumns || $isFirstField) {
                                 $subQuery->where($concatExpression, 'LIKE', '%' . $search . '%');
+                                $isFirstField = false;
                             } else {
                                 $subQuery->orWhere($concatExpression, 'LIKE', '%' . $search . '%');
                             }
                         } else {
                             // Handle individual fields in the related model
                             $lowerField = DB::raw("LOWER($field)");
-                            if ($matchAllColumns) {
+                            if ($matchAllColumns || $isFirstField) {
                                 $subQuery->where($lowerField, 'LIKE', '%' . $search . '%');
+                                $isFirstField = false;
                             } else {
                                 $subQuery->orWhere($lowerField, 'LIKE', '%' . $search . '%');
                             }
@@ -113,7 +117,6 @@ trait SearchTrait
     public static function getSearchableRelations(): array
     {
         $model = new static();
-
         return $model->searchableRelations ?? [];
     }
 }
