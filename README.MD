@@ -61,7 +61,7 @@ class Widget extends Model
 ---
 
 ### 2. **Automatic Column Detection**
-If you don’t specify `$search` fields in your model, the trait will automatically determine searchable columns by fetching all table columns **except**:
+If you don’t specify `$searchable` fields in your model, the trait will automatically determine searchable columns by fetching all table columns **except**:
 - `id` (primary key).
 - Timestamps (`created_at`, `updated_at`).
 - Hidden fields (`$hidden` property in the model).
@@ -72,7 +72,7 @@ class Widget extends Model
 {
     use SearchTrait;
 
-    // No $search defined; columns are auto-detected
+    // No $searchable defined; columns are auto-detected
 }
 ```
 ---
