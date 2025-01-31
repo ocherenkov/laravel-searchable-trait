@@ -3,110 +3,155 @@
 namespace App\Traits\Models;
 
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Query\Expression;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 trait SearchTrait
 {
+
     /**
+     * Scope a query that matches the given search query against all searchable
+     * columns and relations.
+     *
      * @param Builder $query
-     * @param string|null $search
+     * @param string|null $searchTerm
      * @param bool $matchAllColumns
      * @return Builder
      */
-    public function scopeSearch(Builder $query, ?string $search = null, bool $matchAllColumns = false): Builder
+    public function scopeSearch(Builder $query, ?string $searchTerm = null, bool $matchAllColumns = false): Builder
     {
-        if (!$search) {
+        if (!$searchTerm) {
             return $query;
         }
-        $search = strtolower($search);
-        return $query->where(function ($query) use ($search, $matchAllColumns) {
-            // Handle local model searchable columns
-            foreach (static::getSearchableColumns() as $column) {
-                $lowerColumn = DB::raw("LOWER($column)");
-                if ($matchAllColumns) {
-                    $query->where($lowerColumn, 'LIKE', '%' . $search . '%');
-                } else {
-                    $query->orWhere($lowerColumn, 'LIKE', '%' . $search . '%');
-                }
-            }
-            // Handle concatenated fields in the model
-            foreach (static::getSearchableConcatenations() as $concatFields) {
-                $concatExpression = DB::raw("LOWER(CONCAT_WS(' ', " . implode(', ', $concatFields) . "))");
-                if ($matchAllColumns) {
-                    $query->where($concatExpression, 'LIKE', '%' . $search . '%');
-                } else {
-                    $query->orWhere($concatExpression, 'LIKE', '%' . $search . '%');
-                }
-            }
+        $uppercaseSearchTerm = mb_strtoupper($searchTerm);
 
-            // Handle related models
-            foreach (static::getSearchableRelations() as $relation => $fields) {
-                $query->orWhereHas($relation, function (Builder $subQuery) use ($search, $fields, $matchAllColumns) {
-                    $isFirstField = true;
-                    foreach ($fields as $field) {
-                        if (is_array($field)) {
-                            // Handle concatenated fields in the related model
-                            $concatExpression = DB::raw("LOWER(CONCAT_WS(' ', " . implode(', ', $field) . "))");
-                            if ($matchAllColumns || $isFirstField) {
-                                $subQuery->where($concatExpression, 'LIKE', '%' . $search . '%');
-                                $isFirstField = false;
-                            } else {
-                                $subQuery->orWhere($concatExpression, 'LIKE', '%' . $search . '%');
-                            }
-                        } else {
-                            // Handle individual fields in the related model
-                            $lowerField = DB::raw("LOWER($field)");
-                            if ($matchAllColumns || $isFirstField) {
-                                $subQuery->where($lowerField, 'LIKE', '%' . $search . '%');
-                                $isFirstField = false;
-                            } else {
-                                $subQuery->orWhere($lowerField, 'LIKE', '%' . $search . '%');
-                            }
-                        }
-                    }
-                });
-            }
+        return $query->where(function (Builder $subQuery) use ($uppercaseSearchTerm, $matchAllColumns) {
+            $this->applyColumnSearch($subQuery, $uppercaseSearchTerm, $matchAllColumns);
+            $this->applyConcatSearch($subQuery, $uppercaseSearchTerm, $matchAllColumns);
+            $this->applyRelationSearch($subQuery, $uppercaseSearchTerm, $matchAllColumns);
         });
     }
 
     /**
-     * Get all searchable columns
+     * Applies the search condition to the columns of the model.
+     *
+     * @param Builder $query The query builder to apply the search condition to.
+     * @param string $searchTerm The search query.
+     * @param bool $matchAllColumns Whether to match the search query against all columns.
+     * @return void
+     */
+    private function applyColumnSearch(Builder $query, string $searchTerm, bool $matchAllColumns): void
+    {
+        foreach (self::getSearchableColumns() as $column) {
+            $expression = $this->buildExpression($column);
+            $this->addSearchCondition($query, $expression, $searchTerm, $matchAllColumns);
+        }
+    }
+
+    /**
+     * Applies the search condition to the concatenated fields of the model.
+     *
+     * @param Builder $query The query builder to apply the search condition to.
+     * @param string $searchTerm The search query.
+     * @param bool $matchAllColumns Whether to match the search query against all columns.
+     * @return void
+     */
+    private function applyConcatSearch(Builder $query, string $searchTerm, bool $matchAllColumns): void
+    {
+        foreach (self::getSearchableConcatenations() as $fields) {
+            $expression = $this->buildExpression($fields);
+            $this->addSearchCondition($query, $expression, $searchTerm, $matchAllColumns);
+        }
+    }
+
+    /**
+     * Applies the search condition to the relations of the model.
+     *
+     * @param Builder $query The query builder to apply the search condition to.
+     * @param string $searchTerm The search query.
+     * @param bool $matchAllColumns Whether to match the search query against all columns.
+     * @return void
+     */
+    private function applyRelationSearch(Builder $query, string $searchTerm, bool $matchAllColumns): void
+    {
+        foreach (self::getSearchableRelations() as $relation => $fields) {
+            $query->orWhereHas($relation, function (Builder $subQuery) use ($searchTerm, $fields, $matchAllColumns) {
+                foreach ($fields as $index => $field) {
+                    $expression = $this->buildExpression($field);
+                    $this->addSearchCondition($subQuery, $expression, $searchTerm, $matchAllColumns || $index === 0);
+                }
+            });
+        }
+    }
+
+    /**
+     * Builds an expression to search for a string in a field(s).
+     *
+     * @param array|string $fields The field(s) to search in. If an array, the fields will be concatenated with a space in between.
+     * @param string $function The function to use to transform the field(s). Defaults to 'UPPER'.
+     * @return Expression The expression to add to the query.
+     */
+    private function buildExpression(array|string $fields, string $function = 'UPPER'): Expression
+    {
+        $fieldsString = is_array($fields)
+            ? "CONCAT_WS(' ', " . implode(', ', $fields) . ")"
+            : $fields;
+
+        return DB::raw("{$function}($fieldsString)");
+    }
+
+    /**
+     * Adds a condition to the query to search for a string in a column(s) defined by
+     * the expression.
+     *
+     * @param Builder $query
+     * @param string|Expression $expression
+     * @param string $search
+     * @param bool $matchAll
+     */
+    private function addSearchCondition(
+        Builder $query,
+        string|Expression $expression,
+        string $search,
+        bool $matchAll
+    ): void {
+        $matchAll
+            ? $query->where($expression, 'LIKE', '%' . $search . '%')
+            : $query->orWhere($expression, 'LIKE', '%' . $search . '%');
+    }
+
+    /**
+     * Get all searchable columns for the model.
      *
      * @return array
      */
-    public static function getSearchableColumns(): array
+    private static function getSearchableColumns(): array
     {
-        $model = new static();
+        $model = self::createModelInstance();
         $cacheKey = 'searchable_columns_' . $model->getTable();
 
         return Cache::rememberForever($cacheKey, static function () use ($model) {
-            $columns = $model->searchable;
+            $columns = $model->searchable ?? Schema::getColumnListing($model->getTable());
+            $ignoredColumns = [
+                $model->getKeyName(),
+                $model->getUpdatedAtColumn(),
+                $model->getCreatedAtColumn(),
+            ];
 
-            if (empty($columns)) {
-                $columns = Schema::getColumnListing($model->getTable());
-                $ignoredColumns = [
-                    $model->getKeyName(),
-                    $model->getUpdatedAtColumn(),
-                    $model->getCreatedAtColumn(),
-                ];
-                $columns = array_diff($columns, $model->getHidden(), $ignoredColumns);
-            }
-
-            return $columns;
+            return array_diff($columns, $model->getHidden(), $ignoredColumns);
         });
     }
 
     /**
-     * Get all searchable concatenations
+     * Get all searchable concatenations.
      *
      * @return array
      */
-    public static function getSearchableConcatenations(): array
+    private static function getSearchableConcatenations(): array
     {
-        $model = new static();
-        return $model->searchableConcat ?? [];
+        return self::createModelInstance()->searchableConcat ?? [];
     }
 
     /**
@@ -114,9 +159,18 @@ trait SearchTrait
      *
      * @return array
      */
-    public static function getSearchableRelations(): array
+    private static function getSearchableRelations(): array
     {
-        $model = new static();
-        return $model->searchableRelations ?? [];
+        return self::createModelInstance()->searchableRelations ?? [];
+    }
+
+    /**
+     * Helper method to create a static model instance.
+     *
+     * @return static
+     */
+    private static function createModelInstance(): static
+    {
+        return new static();
     }
 }
